@@ -11,19 +11,19 @@ This project focuses on analyzing tweets related to the stock market and predict
 
 ## 🗂 Repository Structure  
 
-- `data/`  
+- `Project_Data/`  
   Contains the dataset files:  
   - `train.csv` (9543 tweets with sentiment labels)  
   - `test.csv` (299 tweets without labels; predictions required)  
 
-- `notebooks/`  
+- `Notebooks/`  
   - `tm_tests_42.ipynb` — Exploratory data analysis, preprocessing, feature engineering experiments, and multiple model tests.  
   - `tm_final_42.ipynb` — Final pipeline notebook with the best-performing model for prediction.
 
-- `predictions/`  
+- `Predictions/`  
   - `pred_42.csv` — CSV file with predicted labels for the test set (columns: `id`, `predicted_label`).
 
-- `reports/`  
+- `Reports/`  
   - `report_42.pdf` — Project report documenting methods, experiments, and results.
 
 ---
