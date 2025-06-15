@@ -1,9 +1,12 @@
+# Library imports
 import re
 import string
 from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
+
+import random
 
 import nltk
 from nltk.corpus import stopwords
@@ -24,9 +27,6 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import StratifiedKFold
 
-
-
-
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
@@ -46,6 +46,7 @@ import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
+
 # Download required NLTK data
 nltk.download('punkt')
 nltk.download('punkt_tab')
@@ -53,22 +54,21 @@ nltk.download('stopwords')
 nltk.download('wordnet')
 
 
-
+# Set random seed for reproducibility
 SEED=42
-
 np.random.seed(SEED)
-
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)  # if using -multi-GPU
+tf.random.set_seed(SEED)
+
 
 # Make PyTorch deterministic
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# TensorFlow
-tf.random.set_seed(SEED)
 
+# Function definitions
 lemma = WordNetLemmatizer()
 stemmer = SnowballStemmer('english')
 
@@ -444,7 +444,7 @@ def plot_f1_by_feateng(df, model_name):
 
     # Color boxes
     for idx, patch in enumerate(box['boxes']):
-        color = 'blue' if idx % 2 == 0 else 'red'
+        color = (92/255, 102/255, 108/255) if idx % 2 == 0 else (190/255, 214/255, 47/255)
         patch.set_facecolor(color)
         patch.set_edgecolor('black')
 
@@ -459,8 +459,8 @@ def plot_f1_by_feateng(df, model_name):
 
     # Legend
     import matplotlib.patches as mpatches
-    train_patch = mpatches.Patch(color='blue', label='train_f1')
-    test_patch = mpatches.Patch(color='red', label='test_f1')
+    train_patch = mpatches.Patch(color=(92/255, 102/255, 108/255), label='train_f1')
+    test_patch = mpatches.Patch(color=(190/255, 214/255, 47/255), label='test_f1')
     ax.legend(handles=[train_patch, test_patch])
 
     plt.tight_layout()
@@ -546,7 +546,6 @@ def make_metrics_dict(y_true, y_pred):
             flat[key] = met[m_name]
     return flat
 
-
 def make_metrics_dict_transformers(data_loader, model, device):
     model.eval()
     all_preds, all_labels = [], []
@@ -573,6 +572,154 @@ def make_metrics_dict_transformers(data_loader, model, device):
             flat[key] = met[m_name]
     return flat
 
+def plot_metric(
+    df: pd.DataFrame,
+    metric: str = 'f1-score',
+    class_label: str = 'macroavg',
+    train_color: str = 'blue',
+    test_color: str = 'red'
+):
+    """
+    Plots a line plot of the specified metric for train and test results by model,
+    preserving the order of models as they appear in the DataFrame.
+
+    Parameters:
+    - df: DataFrame containing columns ['model', 'set', ...metric columns...]
+    - metric: one of 'precision', 'recall', or 'f1-score'
+    - class_label: '0' (Bullish), '1' (Bearish), '2' (Neutral), or 'macroavg'
+    - train_color: color for the train line
+    - test_color: color for the test line
+    """
+    # Map class_label to column prefix and display name
+    label_map = {
+        '0': ('0', 'Bullish'),
+        '1': ('1', 'Bearish'),
+        '2': ('2', 'Neutral'),
+        'macroavg': ('macroavg', 'Macro Avg')
+    }
+    if class_label not in label_map:
+        raise ValueError(f"Invalid class_label {class_label}. "
+                         "Choose from '0', '1', '2', 'macroavg'.")
+    
+    col_prefix, display_name = label_map[class_label]
+    col_name = f"{col_prefix}{metric}"
+    
+    # Check column exists
+    if col_name not in df.columns:
+        raise KeyError(f"Column '{col_name}' not found in DataFrame.")
+    
+    # Split train and test
+    df_train = df[df['set'] == 'train']
+    df_test  = df[df['set'] == 'test']
+    
+    # Preserve original model order
+    model_order = df['model'].drop_duplicates().tolist()
+    
+    # Create aligned series
+    y_train = [df_train.loc[df_train['model'] == m, col_name].values[0] for m in model_order]
+    y_test  = [df_test.loc[df_test['model'] == m, col_name].values[0] for m in model_order]
+    
+    # Plot
+    plt.figure(figsize=(6, 5))
+    plt.plot(model_order, y_train, label='Train', color=train_color, marker='o')
+    plt.plot(model_order, y_test,  label='Test',  color=test_color,  marker='o')
+    
+    plt.xlabel('Model')
+    plt.ylabel(f"{metric.capitalize()} ({display_name})")
+    plt.title(f"{display_name} {metric.capitalize()} by Model")
+    plt.xticks(rotation=45)
+    plt.ylim(0.3,1)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_test_classes_across_models(
+    df: pd.DataFrame,
+    metric: str = 'f1-score',
+    split: str = 'test',
+    class_labels: dict = None,
+    class_colors: dict = None
+):
+    """
+    Plots the specified metric for each class (including macroavg) across models on the x-axis.
+
+    Parameters:
+    - df: DataFrame containing columns ['model', 'set', ...metric columns...]
+    - metric: one of 'precision', 'recall', or 'f1-score'
+    - split: 'train' or 'test' (default 'test')
+    - class_labels: dict mapping class keys to display names
+                    default: {'0':'Bullish','1':'Bearish','2':'Neutral','macroavg':'Macro Avg'}
+    - class_colors: dict mapping class keys to colors
+                    default: standard matplotlib cycle
+    """
+    # Default class label mapping
+    if class_labels is None:
+        class_labels = {
+            '0': 'Bullish',
+            '1': 'Bearish',
+            '2': 'Neutral',
+            'macroavg': 'Macro Avg'
+        }
+    class_keys = list(class_labels.keys())
+    
+    df_sub = df[df['set'] == split]
+    models = df_sub['model'].drop_duplicates().tolist()
+    
+    plt.figure(figsize=(6, 5))
+    
+    for key in class_keys:
+        col = f"{key}{metric}"
+        y = [df_sub.loc[df_sub['model'] == m, col].values[0] for m in models]
+        # thicker line for macroavg
+        lw = 3 if key == 'macroavg' else 1.5
+        plt.plot(models, y, marker='o', label=class_labels[key], 
+                 color=class_colors[key], linewidth=lw)
+    
+    plt.xlabel('Model')
+    plt.ylabel(metric.capitalize())
+    plt.title(f"{metric.capitalize()} across Classes on {split.capitalize()} Set")
+    plt.xticks(rotation=45)
+    plt.ylim(0.3, 1)
+    plt.legend(title="Class")
+    plt.tight_layout()
+    plt.show()
+
+def evaluate_and_print(model, X_train, y_train, X_val, y_val, model_name, rep_name, config):
+    print(f"\n Model: {model_name}, Embedding: {rep_name}, Config: {config}")
+    print("--------------------------------------------------------------------------------------")
+
+    results = {}
+
+    # --- TRAINING METRICS ---
+    y_train_pred = model.predict(X_train)
+    train_acc = accuracy_score(y_train, y_train_pred)
+    train_report = classification_report(y_train, y_train_pred, target_names=['bearish', 'bullish', 'neutral'], output_dict=True)
+
+    print("\nTRAINING METRICS")
+    print(f"\nMacro Avg F1-score: {train_report['macro avg']['f1-score']:.4f}")
+
+    # --- VALIDATION METRICS ---
+    y_val_pred = model.predict(X_val)
+    val_acc = accuracy_score(y_val, y_val_pred)
+    val_report = classification_report(y_val, y_val_pred, target_names=['bearish', 'bullish', 'neutral'], output_dict=True)
+
+    print("\nVALIDATION METRICS")
+    print(f"\nMacro Avg F1-score: {val_report['macro avg']['f1-score']:.4f}")
+
+    # --- Return all scores for storage ---
+    results = {
+        "model": model_name,
+        "embedding": rep_name,
+        "config": config,
+        "train_acc": train_acc,
+        "val_acc": val_acc,
+        "train_f1": train_report["macro avg"]["f1-score"],
+        "val_f1": val_report["macro avg"]["f1-score"],
+        "f1_gap": train_report["macro avg"]["f1-score"] - val_report["macro avg"]["f1-score"]
+    }
+
+    return results
+
 def success1():
     print(r"""    |\/\  ,.
     /   `' |,-,
@@ -586,7 +733,6 @@ def success1():
 (___,'    \  LOTS OF LOVE FROM GROUP 42
    \_       _\ PS: you unlocked BART 1 out of 3, keep running success to find the other rare BARTs!
      `._..-'""")
-
 
 def success2():
     print(r"""            |\|\,'\,'\ ,.
@@ -634,7 +780,5 @@ def success3():
                     \/'      `-.----' \
                     /          \      \ """)
 
-
-import random
 def success():
     random.choice([success1, success2, success3])()
