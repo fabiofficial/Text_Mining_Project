@@ -5,6 +5,8 @@ from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
+from wordcloud import WordCloud
 
 import random
 
@@ -12,6 +14,7 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer, SnowballStemmer   
+from collections import Counter
 
 from gensim.models import Word2Vec                         
 
@@ -66,6 +69,10 @@ tf.random.set_seed(SEED)
 # Make PyTorch deterministic
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
+# Set colors
+color_390 = (190/255, 214/255, 47/255)  # Pantone 390 C
+color_431 = (92/255, 102/255, 108/255)  # Pantone 431 C
 
 
 # Function definitions
@@ -193,6 +200,26 @@ def generate_embeddings(
         return processed
     else:
         return torch.stack(processed)  
+
+def precompute_embeddings(texts, pipes, sequence=False):
+    """
+    texts: list of cleaned strings
+    pipes: dict[name -> HF pipeline]
+    sequence: if False, extracts CLS only; if True, returns list-of-lists of token vectors
+    returns: dict[name -> np.array or list]
+    """
+    cache = {}
+    for name, pipe in pipes.items():
+        # generate_embeddings already handles sequence vs cls
+        print('loading', name)
+        emb = generate_embeddings(texts, pipe, for_sequence_model=sequence)
+        if not sequence:
+            # emb is a torch.Tensor of shape (N, hidden_dim)
+            cache[name] = emb.numpy()
+        else:
+            # emb is a list of N tensors [seq_len_i, hidden_dim]
+            cache[name] = [t.numpy() for t in emb]
+    return cache
 
 feateng_list=['BOW', 'Word2Vec', 'Glove', 'RobertaBase', 'XLMRoberta', 'Finbert', 'DistilbertCased']
 
@@ -406,6 +433,19 @@ def feateng_crossval(
             })
 
     return pd.DataFrame(results)
+
+def get_metric(X_test, y_test, model_name):
+    print(f"\nEvaluating model: {model_name}")
+    model = model_name
+    pred_y = model.predict(X_test)
+
+    y_pred = []
+    for doc in pred_y:
+        y_pred.append(np.argmax(doc, axis=None, out=None))
+
+    train_report = classification_report(y_test, y_pred, target_names=['bearish', 'bullish', 'neutral'], output_dict=True)
+
+    return round(train_report['macro avg']['precision'], 4), round(train_report['macro avg']['recall'], 4), round(train_report['macro avg']['f1-score'], 4)
 
 def plot_f1_by_feateng(df, model_name):
     """
@@ -719,6 +759,178 @@ def evaluate_and_print(model, X_train, y_train, X_val, y_val, model_name, rep_na
     }
 
     return results
+
+def clean_and_tokenize(text):
+    stop_words = set(stopwords.words('english'))
+    text = re.sub(r"http\S+|@\S+|[^a-zA-Z\s]", "", text)
+    text = text.lower()
+    tokens = text.split()
+    tokens = [word for word in tokens if word not in stop_words and len(word) > 1]
+    return tokens
+
+def get_top_words(df, label, top_n=10):
+    label_names = {0: 'Bearish', 1: 'Bullish', 2: 'Neutral'}
+    all_words = [word for tokens in df[df['label'] == label]['tokens'] for word in tokens]
+    most_common = Counter(all_words).most_common(top_n)
+
+    print(f"\nTop {top_n} words for {label_names[label]} tweets:")
+    for word, count in most_common:
+        print(f"{word}: {count}")
+
+    # Plot
+    words, counts = zip(*most_common)
+    plt.figure(figsize=(10, 5))
+    sns.barplot(x=list(counts), y=list(words), color=color_390)
+    plt.title(f"Top {top_n} Words - {label_names[label]}")
+    plt.xlabel("Frequency")
+    plt.ylabel("Words")
+    plt.tight_layout()
+    plt.show()
+
+def plot_wordcloud(df, label, label_names):
+    # Combine all tokens into one string
+    text = " ".join(df[df['label'] == label]['tokens'].sum())
+
+    # Generate word cloud
+    wordcloud = WordCloud(width=800, height=400, background_color='white',
+                          colormap='viridis').generate(text)
+
+    print(f"Word cloud for {label_names[label]} label:")
+
+    plt.figure(figsize=(10, 5))
+    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+def train_tranformer(train_loader, val_loader, model):
+
+  optimizer = AdamW(model.parameters(), lr=2e-5)
+  criterion = CrossEntropyLoss()
+
+  for epoch in range(3):
+      model.train()
+      total_loss = 0
+      for batch in train_loader:
+          input_ids = batch["input_ids"].to(device)
+          attention_mask = batch["attention_mask"].to(device)
+          labels = batch["labels"].to(device)
+
+          optimizer.zero_grad()
+          outputs = model(input_ids, attention_mask)
+          loss = criterion(outputs, labels)
+          loss.backward()
+          optimizer.step()
+
+          total_loss += loss.item()
+
+      print(f"Epoch {epoch + 1} — Loss: {total_loss / len(train_loader):.4f}")
+
+def get_metrics_transformers(data_loader, model):
+  model.eval()
+  all_preds, all_labels = [], []
+  with torch.no_grad():
+      for batch in data_loader:
+          input_ids = batch["input_ids"].to(device)
+          attention_mask = batch["attention_mask"].to(device)
+          labels = batch["labels"].to(device)
+
+          outputs = model(input_ids, attention_mask)
+          preds = torch.argmax(outputs, dim=1)
+
+          all_preds.extend(preds.cpu().numpy())
+          all_labels.extend(labels.cpu().numpy())
+      report=classification_report(all_labels, all_preds, target_names=["0", "1", "2"],output_dict=True, digits=4)
+
+      # Keep only precision, recall, f1-score for each class and macro avg
+      filtered_report = {
+        label: {
+            "precision": report[label]["precision"],
+            "recall": report[label]["recall"],
+            "f1-score": report[label]["f1-score"]
+        }
+        for label in ["0", "1", "2", "macro avg"]
+      }
+
+      df_metrics = pd.DataFrame.from_dict(filtered_report, orient="index")
+      return df_metrics
+
+def evaluate_on_test(X_train_val, y_train_val, X_test, y_test, final_models_kll, final_models_transformers, cv=9, seed=SEED):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    results = []
+
+    for model, feateng in final_models_kll:
+        X_tr, X_te, y_tr, y_te_encoded = apply_feateng(X_train_val, X_test, y_train_val, y_test, feateng, model)
+        y_te = y_test
+        y_tr_pred, y_te_pred = obtain_predictions(X_tr, X_te, y_tr, y_te_encoded, model)
+
+        # Calculate metrics
+
+        print('y_tr', y_tr)
+        print('y_tr_pred', y_tr_pred)
+        print('y_te', y_te)
+        print('y_te_pred', y_te_pred)
+
+
+        results_tr = make_metrics_dict(y_train_val, y_tr_pred)
+        results_te = make_metrics_dict(y_test, y_te_pred)
+
+        results_tr.update(model=model, set='train')
+        results_te.update(model=model, set='test')
+
+        results.append(results_tr)
+        results.append(results_te)
+
+        print(f"Finished evaluating {model}. Macro F1 on train: {results_tr['macroavgf1-score']}, on test: {results_te['macroavgf1-score']}")
+
+    for model in final_models_transformers:
+        X_train_val_cleaned = preprocess(X_train_val["text"])
+        X_test_cleaned = preprocess(X_test["text"])
+
+        if model == "RoBERTa":
+            model_name = "cardiffnlp/twitter-roberta-base-sentiment"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model_clf = RoBERTaSentimentClassifier().to(device)
+
+        elif model == "XLM RoBERTa":
+            model_name = "cardiffnlp/twitter-xlm-roberta-base-sentiment"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model_clf = XLMROBERTASentimentClassifier().to(device)
+
+        elif model == "FinBERT":
+            model_name = "ProsusAI/finbert"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model_clf = FinBERTSentimentClassifier().to(device)
+
+        elif model == "DistilBERT Cased":
+            model_name = "distilbert-base-cased"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model_clf = DistilBERTCSentimentClassifier().to(device)
+
+        elif model == "BART":
+            model_name = "facebook/bart-large"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model_clf = BARTSentimentClassifier().to(device)
+
+        train_val_dataset = TextDataset(X_train_val_cleaned, y_train_val.tolist(), tokenizer)
+        test_dataset = TextDataset(X_test_cleaned, y_test.tolist(), tokenizer)
+
+        train_val_loader = DataLoader(train_val_dataset, batch_size=16, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=16)
+        train_tranformer(train_val_loader, test_loader, model_clf)
+
+        # Calculate metrics
+        results_tr = make_metrics_dict_transformers(train_val_loader, model_clf, device)
+        results_te = make_metrics_dict_transformers(test_loader, model_clf, device)
+        results_tr.update(model=model, set='train')
+        results_te.update(model=model, set='test')
+        results.append(results_tr)
+        results.append(results_te)
+        print(f"Finished evaluating {model}. Macro F1 on train: {results_tr['macroavgf1-score']}, on test: {results_te['macroavgf1-score']}")
+
+
+    return pd.DataFrame(results)
 
 def success1():
     print(r"""    |\/\  ,.
