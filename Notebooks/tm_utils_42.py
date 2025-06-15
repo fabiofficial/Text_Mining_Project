@@ -24,6 +24,9 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import StratifiedKFold
 
+
+
+
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
@@ -48,6 +51,23 @@ nltk.download('punkt')
 nltk.download('punkt_tab')
 nltk.download('stopwords')
 nltk.download('wordnet')
+
+
+
+SEED=42
+
+np.random.seed(SEED)
+
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)  # if using -multi-GPU
+
+# Make PyTorch deterministic
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# TensorFlow
+tf.random.set_seed(SEED)
 
 lemma = WordNetLemmatizer()
 stemmer = SnowballStemmer('english')
